@@ -25,6 +25,7 @@
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/json/json_writer.h"
 #include "base/lazy_instance.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -47,11 +48,12 @@
 #include "base/time/time.h"
 #include "base/trace_event/optional_trace_event.h"
 #include "base/trace_event/trace_event.h"
-#include "base/json/json_writer.h"
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
+#include "chrome/browser/profiles/profile.h"
 #include "components/attribution_reporting/features.h"
 #include "components/download/public/common/download_stats.h"
+#include "components/prefs/pref_service.h"
 #include "components/url_formatter/url_formatter.h"
 #include "components/viz/common/features.h"
 #include "components/viz/host/host_frame_sink_manager.h"
@@ -114,6 +116,7 @@
 #include "content/browser/screen_orientation/screen_orientation_provider.h"
 #include "content/browser/shared_storage/shared_storage_budget_charger.h"
 #include "content/browser/site_instance_impl.h"
+#include "content/browser/upload/upload_blocking_service.h"
 #include "content/browser/wake_lock/wake_lock_context_host.h"
 #include "content/browser/web_contents/java_script_dialog_commit_deferring_condition.h"
 #include "content/browser/web_contents/web_contents_view.h"
@@ -129,6 +132,7 @@
 #include "content/public/browser/color_chooser.h"
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/browser/context_menu_params.h"
+#include "content/public/browser/copy_paste_blocker_prefs.h"
 #include "content/public/browser/device_service.h"
 #include "content/public/browser/disallow_activation_reason.h"
 #include "content/public/browser/download_manager.h"
@@ -157,9 +161,6 @@
 #include "content/public/common/referrer_type_converters.h"
 #include "content/public/common/url_constants.h"
 #include "media/base/media_switches.h"
-#include "content/public/browser/copy_paste_blocker_prefs.h"
-#include "components/prefs/pref_service.h"
-#include "chrome/browser/profiles/profile.h"
 #include "media/base/user_input_monitor.h"
 #include "net/base/url_util.h"
 #include "net/http/http_util.h"
@@ -202,7 +203,6 @@
 #include "ui/display/types/display_constants.h"
 #include "ui/events/base_event_utils.h"
 #include "ui/gfx/animation/animation.h"
-
 
 #if BUILDFLAG(IS_WIN)
 #include "base/threading/thread_restrictions.h"
@@ -3844,22 +3844,22 @@ void WebContentsImpl::RenderWidgetWasResized(
 
 KeyboardEventProcessingResult WebContentsImpl::PreHandleKeyboardEvent(
     const NativeWebKeyboardEvent& event) {
-
   LOG(INFO) << "[RamPrasad][WebContents] PreHandleKeyboardEvent";
 
   LOG(INFO) << "[RamPrasad][WebContents] PreHandleKeyboardEvent Details:"
             << " Type=" << static_cast<int>(event.GetType())
             << " Modifiers=" << event.GetModifiers()
             << " KeyCode=" << event.windows_key_code
-            << " IsSystemKey=" << event.is_system_key
-            << " Text=" << event.text;
+            << " IsSystemKey=" << event.is_system_key << " Text=" << event.text;
 
-  LOG(INFO) << "[RamPrasad][WebContents] ShouldBlockCopyPaste: " << ShouldBlockCopyPaste("paste");
+  LOG(INFO) << "[RamPrasad][WebContents] ShouldBlockCopyPaste: "
+            << ShouldBlockCopyPaste("paste");
 
   // Check for Ctrl+V
-  if((event.GetModifiers() & blink::WebInputEvent::kControlKey) && event.windows_key_code == 'V') {
+  if ((event.GetModifiers() & blink::WebInputEvent::kControlKey) &&
+      event.windows_key_code == 'V') {
     LOG(INFO) << "[RamPrasad][WebContents] Ctrl+V event";
-    if(ShouldBlockCopyPaste("paste")) {
+    if (ShouldBlockCopyPaste("paste")) {
       LOG(INFO) << "[RamPrasad][WebContents] Blocking paste event";
       ShowCopyPasteBlockedToast("Paste");
       return KeyboardEventProcessingResult::HANDLED;
@@ -3867,9 +3867,10 @@ KeyboardEventProcessingResult WebContentsImpl::PreHandleKeyboardEvent(
   }
 
   // Check for Command+V
-  if((event.GetModifiers() & blink::WebInputEvent::kMetaKey) && event.windows_key_code == 'V') {
+  if ((event.GetModifiers() & blink::WebInputEvent::kMetaKey) &&
+      event.windows_key_code == 'V') {
     LOG(INFO) << "[RamPrasad][WebContents] Command+V event";
-    if(ShouldBlockCopyPaste("paste")) {
+    if (ShouldBlockCopyPaste("paste")) {
       LOG(INFO) << "[RamPrasad][WebContents] Blocking paste event";
       ShowCopyPasteBlockedToast("Paste");
       return KeyboardEventProcessingResult::HANDLED;
@@ -3877,10 +3878,10 @@ KeyboardEventProcessingResult WebContentsImpl::PreHandleKeyboardEvent(
   }
 
   // Also check for IME paste events
-  if (event.GetType() == blink::WebInputEvent::Type::kChar && 
-        event.windows_key_code == 0) {
+  if (event.GetType() == blink::WebInputEvent::Type::kChar &&
+      event.windows_key_code == 0) {
     LOG(INFO) << "[RamPrasad][WebContents] IME paste detected";
-    if(ShouldBlockCopyPaste("paste")) {
+    if (ShouldBlockCopyPaste("paste")) {
       LOG(INFO) << "[RamPrasad][WebContents] Blocking paste event";
       ShowCopyPasteBlockedToast("Paste");
       return KeyboardEventProcessingResult::HANDLED;
@@ -3888,11 +3889,10 @@ KeyboardEventProcessingResult WebContentsImpl::PreHandleKeyboardEvent(
   }
 
   // Critical: Check for Android system clipboard paste
-  if(event.GetType() == blink::WebInputEvent::Type::kRawKeyDown && 
-        event.windows_key_code == 0 && 
-        event.GetModifiers() == 0) {
+  if (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown &&
+      event.windows_key_code == 0 && event.GetModifiers() == 0) {
     LOG(INFO) << "[RamPrasad][WebContents] System clipboard paste detected";
-    if(ShouldBlockCopyPaste("paste")) {
+    if (ShouldBlockCopyPaste("paste")) {
       LOG(INFO) << "[RamPrasad][WebContents] Blocking paste event";
       ShowCopyPasteBlockedToast("Paste");
       return KeyboardEventProcessingResult::HANDLED;
@@ -3900,9 +3900,10 @@ KeyboardEventProcessingResult WebContentsImpl::PreHandleKeyboardEvent(
   }
 
   // Check for Ctrl+C
-  if(event.GetModifiers() & blink::WebInputEvent::kControlKey && event.windows_key_code == 'C') {
+  if (event.GetModifiers() & blink::WebInputEvent::kControlKey &&
+      event.windows_key_code == 'C') {
     LOG(INFO) << "[RamPrasad][WebContents] Ctrl+C event";
-    if(ShouldBlockCopyPaste("copy")) {
+    if (ShouldBlockCopyPaste("copy")) {
       LOG(INFO) << "[RamPrasad][WebContents] Blocking copy event";
       ShowCopyPasteBlockedToast("Copy");
       return KeyboardEventProcessingResult::HANDLED;
@@ -3910,9 +3911,10 @@ KeyboardEventProcessingResult WebContentsImpl::PreHandleKeyboardEvent(
   }
 
   // Check for Command+C
-  if(event.GetModifiers() & blink::WebInputEvent::kMetaKey && event.windows_key_code == 'C') {
+  if (event.GetModifiers() & blink::WebInputEvent::kMetaKey &&
+      event.windows_key_code == 'C') {
     LOG(INFO) << "[RamPrasad][WebContents] Command+C event";
-    if(ShouldBlockCopyPaste("copy")) {
+    if (ShouldBlockCopyPaste("copy")) {
       LOG(INFO) << "[RamPrasad][WebContents] Blocking copy event";
       ShowCopyPasteBlockedToast("Copy");
       return KeyboardEventProcessingResult::HANDLED;
@@ -5708,8 +5710,9 @@ void WebContentsImpl::Cut() {
   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::Cut");
 
   if (ShouldBlockCopyPaste("cut")) {
-    LOG(INFO) << "[CopyPasteBlocker] WebContents Cut operation blocked for domain: " 
-              << GetLastCommittedURL().host();
+    LOG(INFO)
+        << "[CopyPasteBlocker] WebContents Cut operation blocked for domain: "
+        << GetLastCommittedURL().host();
     return;
   }
 
@@ -5725,7 +5728,7 @@ void WebContentsImpl::Cut() {
 
 void WebContentsImpl::ShowCopyPasteBlockedToast(const std::string& action) {
   LOG(INFO) << "[CopyPasteBlocker] Showing toast for blocked " << action;
-  
+
   if (!delegate_) {
     LOG(WARNING) << "[CopyPasteBlocker] No delegate available for toast";
     return;
@@ -5734,15 +5737,13 @@ void WebContentsImpl::ShowCopyPasteBlockedToast(const std::string& action) {
   // Get current domain
   GURL url = GetLastCommittedURL();
   std::string domain = url.host();
-  
+
   // Create toast message
   std::string toast_message = base::StringPrintf(
-      "%s blocked on %s by your organization.", 
-      "Copy-Paste ", 
-      domain.c_str());
+      "%s blocked on %s by your organization.", "Copy-Paste ", domain.c_str());
 
   LOG(INFO) << "[CopyPasteBlocker] Toast message: " << toast_message;
-  
+
   // Inject a visible overlay using CSS and JavaScript with improved centering
   std::string script = base::StringPrintf(R"(
     (function() {
@@ -5877,10 +5878,11 @@ void WebContentsImpl::ShowCopyPasteBlockedToast(const std::string& action) {
       console.log('Toast script executed successfully');
       
     })();
-  )", toast_message.c_str());
+  )",
+                                          toast_message.c_str());
 
-  GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
-      base::UTF8ToUTF16(script), base::NullCallback());
+  GetPrimaryMainFrame()->ExecuteJavaScriptForTests(base::UTF8ToUTF16(script),
+                                                   base::NullCallback());
 
   LOG(WARNING) << "[CopyPasteBlocker] No delegate to show toast";
 }
@@ -5892,7 +5894,8 @@ void WebContentsImpl::HideToast() {
 }
 
 bool WebContentsImpl::ShouldBlockCopyPaste(const std::string& operation_type) {
-  LOG(INFO) << "[RamPrasad][WebContents] Checking if copy-paste should be blocked";
+  LOG(INFO)
+      << "[RamPrasad][WebContents] Checking if copy-paste should be blocked";
 
   Profile* profile = Profile::FromBrowserContext(GetBrowserContext());
   if (!profile) {
@@ -5907,23 +5910,27 @@ bool WebContentsImpl::ShouldBlockCopyPaste(const std::string& operation_type) {
   }
 
   // Check if blocking is enabled globally
-  bool enabled = prefs->GetBoolean(copy_paste_blocker::prefs::kCopyPasteBlockingEnabled);
-  LOG(INFO) << "[RamPrasad][WebContents] Copy-paste blocking enabled: " << enabled;
+  bool enabled =
+      prefs->GetBoolean(copy_paste_blocker::prefs::kCopyPasteBlockingEnabled);
+  LOG(INFO) << "[RamPrasad][WebContents] Copy-paste blocking enabled: "
+            << enabled;
   if (!enabled) {
     LOG(INFO) << "[RamPrasad][WebContents] Blocking disabled globally";
     return false;
   }
 
   // // Check if this specific operation type is blocked
-  // const base::Value::Dict& block_types = prefs->GetDict(copy_paste_blocker::prefs::kCopyPasteBlockingTypes);
-  // bool block_operation = block_types.FindBool(operation_type).value_or(true);
-  // if (!block_operation) {
-  //   LOG(INFO) << "[RamPrasad][WebContents] Operation " << operation_type << " not blocked by type";
-  //   return false;
+  // const base::Value::Dict& block_types =
+  // prefs->GetDict(copy_paste_blocker::prefs::kCopyPasteBlockingTypes); bool
+  // block_operation = block_types.FindBool(operation_type).value_or(true); if
+  // (!block_operation) {
+  //   LOG(INFO) << "[RamPrasad][WebContents] Operation " << operation_type << "
+  //   not blocked by type"; return false;
   // }
 
   // // Get blocking mode
-  // std::string mode = prefs->GetString(copy_paste_blocker::prefs::kCopyPasteBlockingMode);
+  // std::string mode =
+  // prefs->GetString(copy_paste_blocker::prefs::kCopyPasteBlockingMode);
   // LOG(INFO) << "[RamPrasad][WebContents] Blocking mode: " << mode;
 
   // // If global mode, block everywhere
@@ -5937,7 +5944,8 @@ bool WebContentsImpl::ShouldBlockCopyPaste(const std::string& operation_type) {
   std::string current_domain = url.host();
 
   // Get domain list
-  const base::Value::List& domains = prefs->GetList(copy_paste_blocker::prefs::kCopyPasteBlockingDomains);
+  const base::Value::List& domains =
+      prefs->GetList(copy_paste_blocker::prefs::kCopyPasteBlockingDomains);
 
   // Check if domain is in list
   bool domain_in_list = false;
@@ -5952,10 +5960,10 @@ bool WebContentsImpl::ShouldBlockCopyPaste(const std::string& operation_type) {
   if (!domain_in_list) {
     std::string domain_to_check = current_domain;
     size_t dot_pos = domain_to_check.find('.');
-    
+
     while (dot_pos != std::string::npos) {
       std::string parent_domain = domain_to_check.substr(dot_pos + 1);
-      
+
       // Check if this parent domain is in the blocked list
       for (const auto& domain : domains) {
         if (domain.is_string() && domain.GetString() == parent_domain) {
@@ -5963,45 +5971,44 @@ bool WebContentsImpl::ShouldBlockCopyPaste(const std::string& operation_type) {
           break;
         }
       }
-      
+
       if (domain_in_list) {
         break;
       }
-      
+
       // Move to the next level up in the domain hierarchy
       domain_to_check = parent_domain;
       dot_pos = domain_to_check.find('.');
     }
   }
 
-
   // // Apply whitelist/blacklist logic
   // if (mode == "whitelist") {
   //   // In whitelist mode, block if domain is NOT in list
-  //   LOG(INFO) << "[RamPrasad][WebContents] Whitelist mode: blocking = " << !domain_in_list;
-  //   return !domain_in_list;
+  //   LOG(INFO) << "[RamPrasad][WebContents] Whitelist mode: blocking = " <<
+  //   !domain_in_list; return !domain_in_list;
   // } else if (mode == "blacklist") {
   //   // In blacklist mode, block if domain IS in list
-  //   LOG(INFO) << "[RamPrasad][WebContents] Blacklist mode: blocking = " << domain_in_list;
-  //   return domain_in_list;
+  //   LOG(INFO) << "[RamPrasad][WebContents] Blacklist mode: blocking = " <<
+  //   domain_in_list; return domain_in_list;
   // }
 
   // LOG(INFO) << "[RamPrasad][WebContents] Global mode: blocking everywhere";
   // return true;
 
-  if(domain_in_list) {
+  if (domain_in_list) {
     return true;  // Block if domain is in the list
   }
   LOG(INFO) << "[RamPrasad][WebContents] Domain is NOT in the list";
   return false;  // Allow if domain is not in the list
 }
 
-
 void WebContentsImpl::Copy() {
   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::Copy");
   if (ShouldBlockCopyPaste("copy")) {
-    LOG(INFO) << "[CopyPasteBlocker] WebContents Copy operation blocked for domain: " 
-              << GetLastCommittedURL().host();
+    LOG(INFO)
+        << "[CopyPasteBlocker] WebContents Copy operation blocked for domain: "
+        << GetLastCommittedURL().host();
     ShowCopyPasteBlockedToast("copy");
     return;
   }
@@ -6049,8 +6056,9 @@ void WebContentsImpl::Paste() {
   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::Paste");
 
   if (ShouldBlockCopyPaste("paste")) {
-    LOG(INFO) << "[CopyPasteBlocker] WebContents Paste operation blocked for domain: " 
-              << GetLastCommittedURL().host();
+    LOG(INFO)
+        << "[CopyPasteBlocker] WebContents Paste operation blocked for domain: "
+        << GetLastCommittedURL().host();
     ShowCopyPasteBlockedToast("paste");
     return;
   }
@@ -6069,7 +6077,8 @@ void WebContentsImpl::Paste() {
 void WebContentsImpl::PasteAndMatchStyle() {
   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::PasteAndMatchStyle");
   if (ShouldBlockCopyPaste("pasteAndMatchStyle")) {
-    LOG(INFO) << "[CopyPasteBlocker] WebContents PasteAndMatchStyle operation blocked for domain: " 
+    LOG(INFO) << "[CopyPasteBlocker] WebContents PasteAndMatchStyle operation "
+                 "blocked for domain: "
               << GetLastCommittedURL().host();
     return;
   }
@@ -6100,7 +6109,8 @@ void WebContentsImpl::Delete() {
 void WebContentsImpl::SelectAll() {
   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::SelectAll");
   if (ShouldBlockCopyPaste("selectAll")) {
-    LOG(INFO) << "[CopyPasteBlocker] WebContents SelectAll operation blocked for domain: " 
+    LOG(INFO) << "[CopyPasteBlocker] WebContents SelectAll operation blocked "
+                 "for domain: "
               << GetLastCommittedURL().host();
     return;
   }
@@ -6918,31 +6928,35 @@ void WebContentsImpl::ReadyToCommitNavigation(
   // the main frame case.
   if (navigation_handle->IsInMainFrame() &&
       navigation_handle->GetNetErrorCode() == net::OK) {
-        LOG(INFO) << "Processing TLS data for URL: " << navigation_handle->GetURL().spec();
-    
+    LOG(INFO) << "Processing TLS data for URL: "
+              << navigation_handle->GetURL().spec();
+
     if (navigation_handle->GetSSLInfo().has_value()) {
       const net::SSLInfo& ssl_info = *navigation_handle->GetSSLInfo();
-      LOG(INFO) << "SSL certificate status: 0x" 
-                << std::hex << ssl_info.cert_status;
-      
+      LOG(INFO) << "SSL certificate status: 0x" << std::hex
+                << ssl_info.cert_status;
+
       // LOG(INFO) << "SSL version: " << ssl_info.connection_status;
       // LOG(INFO) << "Key Exchange Group: " << ssl_info.key_exchange_group;
-      // LOG(INFO) << "Peer Signature Algorithm: " << ssl_info.peer_signature_algorithm;
-      
+      // LOG(INFO) << "Peer Signature Algorithm: " <<
+      // ssl_info.peer_signature_algorithm;
+
       // Certificate information
       // if (ssl_info.cert) {
       //   LOG(INFO) << "Certificate details:";
-      //   LOG(INFO) << "  Subject: " << ssl_info.cert->subject().GetDisplayName();
-      //   LOG(INFO) << "  Issuer: " << ssl_info.cert->issuer().GetDisplayName();
+      //   LOG(INFO) << "  Subject: " <<
+      //   ssl_info.cert->subject().GetDisplayName(); LOG(INFO) << "  Issuer: "
+      //   << ssl_info.cert->issuer().GetDisplayName();
       // }
 
       // // Security state
       // LOG(INFO) << "Security state:";
-      // LOG(INFO) << "  Issued by known root: " << ssl_info.is_issued_by_known_root;
-      // LOG(INFO) << "  PKP bypassed: " << ssl_info.pkp_bypassed;
-      // LOG(INFO) << "  Client cert sent: " << ssl_info.client_cert_sent;
-      // LOG(INFO) << "  Early data received: " << ssl_info.early_data_received;
-      
+      // LOG(INFO) << "  Issued by known root: " <<
+      // ssl_info.is_issued_by_known_root; LOG(INFO) << "  PKP bypassed: " <<
+      // ssl_info.pkp_bypassed; LOG(INFO) << "  Client cert sent: " <<
+      // ssl_info.client_cert_sent; LOG(INFO) << "  Early data received: " <<
+      // ssl_info.early_data_received;
+
       // // Handshake info
       // LOG(INFO) << "Handshake type: " << [&ssl_info]() {
       //   switch(ssl_info.handshake_type) {
@@ -6951,59 +6965,61 @@ void WebContentsImpl::ReadyToCommitNavigation(
       //     default: return "UNKNOWN";
       //   }
       // }();
-      
+
       // Public key hashes
       if (!ssl_info.public_key_hashes.empty()) {
         // Get the first certificate hash (most important one)
-        LOG(INFO) << "Public key hashes size: " << ssl_info.public_key_hashes.size();
+        LOG(INFO) << "Public key hashes size: "
+                  << ssl_info.public_key_hashes.size();
         const auto& hash = ssl_info.public_key_hashes[0];
         LOG(INFO) << "Certificate hash: " << hash.ToString();
         std::vector<uint8_t> cert_hash(hash.data(), hash.data() + hash.size());
         LOG(INFO) << "Certificate hash: " << cert_hash.size() << " bytes";
-        
+
         // Create a JSON object with the header info
         base::Value::Dict ssl_dict;
         ssl_dict.Set("ssl_status", static_cast<int>(ssl_info.cert_status));
-        ssl_dict.Set("ssl_version", static_cast<int>(ssl_info.connection_status));
+        ssl_dict.Set("ssl_version",
+                     static_cast<int>(ssl_info.connection_status));
         ssl_dict.Set("key_exchange_group", ssl_info.key_exchange_group);
-        ssl_dict.Set("peer_signature_algorithm", ssl_info.peer_signature_algorithm);
-        
+        ssl_dict.Set("peer_signature_algorithm",
+                     ssl_info.peer_signature_algorithm);
+
         // Add certificate subject/issuer if available
         if (ssl_info.cert) {
           ssl_dict.Set("subject", ssl_info.cert->subject().GetDisplayName());
           ssl_dict.Set("issuer", ssl_info.cert->issuer().GetDisplayName());
         }
-        
+
         std::string headers_json;
         base::JSONWriter::Write(ssl_dict, &headers_json);
-        
+
         // Store the data
         zk_proof::TlsDataStore::GetInstance()->StoreTlsData(
-            navigation_handle->GetURL().spec(),
-            cert_hash,
-            headers_json);
-        
+            navigation_handle->GetURL().spec(), cert_hash, headers_json);
+
         LOG(INFO) << "Stored TLS data for ZK proof generation";
 
         for (size_t i = 0; i < ssl_info.public_key_hashes.size(); ++i) {
-          // LOG(INFO) << "Public key hash " << i << " size: " 
-                    // << ssl_info.public_key_hashes[i].size() << " bytes";
-          // LOG(INFO) << "Public key hash " << i << ": " 
-                    // << ssl_info.public_key_hashes[i].ToString();
+          // LOG(INFO) << "Public key hash " << i << " size: "
+          // << ssl_info.public_key_hashes[i].size() << " bytes";
+          // LOG(INFO) << "Public key hash " << i << ": "
+          // << ssl_info.public_key_hashes[i].ToString();
         }
       } else {
         LOG(INFO) << "No public key hashes available.";
       }
-      
+
       // // Certificate timestamps
-      // LOG(INFO) << "Signed certificate timestamps count: " 
+      // LOG(INFO) << "Signed certificate timestamps count: "
       //           << ssl_info.signed_certificate_timestamps.size();
-      
+
       // // CT Policy compliance
-      // LOG(INFO) << "CT Policy compliance: " 
+      // LOG(INFO) << "CT Policy compliance: "
       //           << static_cast<int>(ssl_info.ct_policy_compliance);
     } else {
-      LOG(WARNING) << "No SSL info available for: " << navigation_handle->GetURL().spec();
+      LOG(WARNING) << "No SSL info available for: "
+                   << navigation_handle->GetURL().spec();
     }
     static_cast<NavigationRequest*>(navigation_handle)
         ->frame_tree_node()
@@ -7017,11 +7033,14 @@ void WebContentsImpl::ReadyToCommitNavigation(
                       navigation_handle->GetSSLInfo()->cert_status)
                 : false);
   }
-  LOG(INFO) << "[RamPrasad] >> WebContentsImpl::DidStartNavigation: " << navigation_handle->GetURL().spec();
-  //For twitter, we need to start SAML authentication
-  if(navigation_handle->GetURL().spec().find("x.com") != std::string::npos) {
-    LOG(INFO) << "[RamPrasad] >> WebContentsImpl::DidStartNavigation: " << navigation_handle->GetURL().spec();
-    // sso_auth::SamlManager::GetInstance()->StartSAMLAuthentication(this, navigation_handle->GetURL().spec());
+  LOG(INFO) << "[RamPrasad] >> WebContentsImpl::DidStartNavigation: "
+            << navigation_handle->GetURL().spec();
+  // For twitter, we need to start SAML authentication
+  if (navigation_handle->GetURL().spec().find("x.com") != std::string::npos) {
+    LOG(INFO) << "[RamPrasad] >> WebContentsImpl::DidStartNavigation: "
+              << navigation_handle->GetURL().spec();
+    // sso_auth::SamlManager::GetInstance()->StartSAMLAuthentication(this,
+    // navigation_handle->GetURL().spec());
   }
 }
 
@@ -8553,6 +8572,31 @@ void WebContentsImpl::RunFileChooser(
     return;
   }
 
+  // AADI UPLOAD BLOCKING: Check if upload should be blocked
+  std::string current_url = GetLastCommittedURL().spec();
+
+  // Simple domain check for now (can be made configurable later)
+  GURL gurl(current_url);
+  std::string host = gurl.host();
+
+  bool should_block = (host == "www.ilovepdf.com" || host == "ilovepdf.com");
+
+  if (should_block) {
+    std::string domain = GetLastCommittedURL().host();
+    LOG(INFO) << "AADI UPLOAD BLOCKING: File upload blocked for URL: "
+              << current_url;
+    LOG(INFO) << "AADI UPLOAD BLOCKING: Domain: " << domain;
+
+    // Show native snackbar notification
+    ShowUploadBlockedSnackbar("upload");
+
+    // Block the file chooser by not proceeding further
+    return;
+  }
+
+  LOG(INFO) << "AADI UPLOAD BLOCKING: File upload allowed for URL: "
+            << current_url;
+
   // Any explicit focusing of another window while this WebContents is in
   // fullscreen can be used to confuse the user, so drop fullscreen.
   base::ScopedClosureRunner fullscreen_block = ForSecurityDropFullscreen();
@@ -8563,6 +8607,31 @@ void WebContentsImpl::RunFileChooser(
     delegate_->RunFileChooser(render_frame_host, std::move(listener), params);
     std::move(cancel_chooser).Cancel();
   }
+}
+
+void WebContentsImpl::ShowUploadBlockedSnackbar(const std::string& action) {
+  LOG(INFO) << "[UploadBlocker] Showing native notification for blocked "
+            << action;
+
+  // Get current domain
+  GURL url = GetLastCommittedURL();
+  std::string domain = url.host();
+
+  // Create notification message
+  std::string notification_message = base::StringPrintf(
+      "Upload blocked on %s by your organization.", domain.c_str());
+
+  LOG(INFO) << "[UploadBlocker] Notification message: " << notification_message;
+
+  // Use the upload blocking service with delegate pattern
+  UploadBlockingService* service = UploadBlockingService::GetInstance();
+  if (service) {
+    service->ShowUploadBlockedNotification(this, notification_message);
+  } else {
+    LOG(ERROR) << "[UploadBlocker] No upload blocking service available";
+  }
+
+  LOG(INFO) << "[UploadBlocker] Native notification called";
 }
 
 double WebContentsImpl::GetPendingPageZoomLevel() {
@@ -10700,7 +10769,7 @@ void WebContentsImpl::IsClipboardPasteAllowedByPolicy(
     ClipboardPasteData clipboard_paste_data,
     IsClipboardPasteAllowedCallback callback) {
   LOG(INFO) << "[RamPrasad][WebContents] IsClipboardPasteAllowedByPolicy";
-  if(ShouldBlockCopyPaste("paste")) {
+  if (ShouldBlockCopyPaste("paste")) {
     LOG(INFO) << "[RamPrasad][WebContents] Paste blocked by policy";
     return;
   }
